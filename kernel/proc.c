@@ -263,6 +263,7 @@ growproc(int n)
   struct proc *p = myproc();
 
   sz = p->sz;
+  printf("growproc:\n");
   if(n > 0){
     if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
       return -1;

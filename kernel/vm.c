@@ -15,37 +15,56 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+int kalloc_count = 0; // count the number of times kalloc is called
+
 // Make a direct-map page table for the kernel.
+// 把物理内存和一些硬件设备的物理地址空间直接映射到内核虚拟地址空间
 pagetable_t
 kvmmake(void)
 {
+  int before = kalloc_count;
   pagetable_t kpgtbl;
-
-  kpgtbl = (pagetable_t) kalloc();
+  // 先分配一个页表页
+  kpgtbl = (pagetable_t)kalloc();
+  // 将 0x05 页表页清零
   memset(kpgtbl, 0, PGSIZE);
 
   // uart registers
+  // 串口
   kvmmap(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+  printf("kvmmap: from %ld to %ld, kalloc call %d times\n", UART0, UART0 + PGSIZE, kalloc_count - before);
 
   // virtio mmio disk interface
+  // 虚拟磁盘
   kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+  printf("kvmmap: from %d to %d, kalloc call %d times\n", VIRTIO0, VIRTIO0 + PGSIZE, kalloc_count - before);
 
   // PLIC
+  // 中断控制器
   kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W);
+  printf("kvmmap: from %ld to %ld, kalloc call %d times\n", PLIC, PLIC + 0x4000000, kalloc_count - before);
 
   // map kernel text executable and read-only.
-  kvmmap(kpgtbl, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+  // 内核代码段
+  kvmmap(kpgtbl, KERNBASE, KERNBASE, (uint64)etext - KERNBASE, PTE_R | PTE_X);
+  printf("kvmmap: from %ld to %ld, kalloc call %d times\n", KERNBASE, (uint64)etext, kalloc_count - before);
 
   // map kernel data and the physical RAM we'll make use of.
-  kvmmap(kpgtbl, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+  // 内核数据段和物理内存
+  kvmmap(kpgtbl, (uint64)etext, (uint64)etext, PHYSTOP - (uint64)etext, PTE_R | PTE_W);
+  printf("kvmmap: from %ld to %ld, kalloc call %d times\n", (uint64)etext, PHYSTOP, kalloc_count - before);
 
   // map the trampoline for trap entry/exit to
   // the highest virtual address in the kernel.
+  // 陷入/返回代码
   kvmmap(kpgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+  printf("kvmmap: from %ld to %ld, kalloc call %d times\n", TRAMPOLINE, (uint64)trampoline + PGSIZE, kalloc_count - before);
 
   // allocate and map a kernel stack for each process.
+  // 为每个进程分配并映射内核栈
   proc_mapstacks(kpgtbl);
-  
+  printf("kvmmap: kalloc call %d times\n", kalloc_count - before);  
+
   return kpgtbl;
 }
 
@@ -83,22 +102,34 @@ kvminithart()
 //   12..20 -- 9 bits of level-0 index.
 //    0..11 -- 12 bits of byte offset within the page.
 pte_t *
-walk(pagetable_t pagetable, uint64 va, int alloc)
+walk(pagetable_t pagetable, uint64 va, int alloc) // alloc表示是否分配页表
 {
-  if(va >= MAXVA)
+  // 地址合法性检查
+  if (va >= MAXVA)
     panic("walk");
-
-  for(int level = 2; level > 0; level--) {
+  // 逐级遍历页表
+  for (int level = 2; level > 0; level--)
+  {
+    // 查找当前级别的页表项
     pte_t *pte = &pagetable[PX(level, va)];
-    if(*pte & PTE_V) {
+    // 如果页表项有效（PTE_V），进入下一层页表
+    if (*pte & PTE_V)
+    {
+      // 计算当前页表项对应的物理地址
       pagetable = (pagetable_t)PTE2PA(*pte);
-    } else {
-      if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)
+    }
+    else
+    {
+      // 不需要分配页表或者分配失败
+      if (!alloc || (pagetable = (pde_t *)kalloc()) == 0)
         return 0;
+      kalloc_count++;
       memset(pagetable, 0, PGSIZE);
+      // 将新分配的页表页的物理地址写入 *pte，并设置有效位
       *pte = PA2PTE(pagetable) | PTE_V;
     }
   }
+  // 返回最后一级页表项的地址
   return &pagetable[PX(0, va)];
 }
 
@@ -230,28 +261,40 @@ uvmfirst(pagetable_t pagetable, uchar *src, uint sz)
 // Allocate PTEs and physical memory to grow process from oldsz to
 // newsz, which need not be page aligned.  Returns new size or 0 on error.
 uint64
-uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
+uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm) // 为进程分配新的虚拟内存空间
 {
   char *mem;
   uint64 a;
-
+  // 边界检查
   if(newsz < oldsz)
     return oldsz;
-
+  // 分页对齐
   oldsz = PGROUNDUP(oldsz);
-  for(a = oldsz; a < newsz; a += PGSIZE){
+  int before = kalloc_count;
+  // 分配循环
+  for (a = oldsz; a < newsz; a += PGSIZE)
+  {
+    // 分配物理页
     mem = kalloc();
-    if(mem == 0){
+    kalloc_count++;
+    if (mem == 0)
+    {
       uvmdealloc(pagetable, a, oldsz);
       return 0;
     }
+    // 原先的值为5
     memset(mem, 0, PGSIZE);
-    if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_R|PTE_U|xperm) != 0){
+    // 调用 mappages，将虚拟地址 a 映射到物理地址 mem，权限包括读、用户访问和 xperm
+    // 映射失败则释放物理页并回滚
+    if (mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_R | PTE_U | xperm) != 0)
+    {
       kfree(mem);
       uvmdealloc(pagetable, a, oldsz);
       return 0;
     }
   }
+  printf("uvmalloc: from %ld to %ld, kalloc called %d times\n", oldsz, newsz, kalloc_count - before);
+  // 返回新的地址
   return newsz;
 }
 

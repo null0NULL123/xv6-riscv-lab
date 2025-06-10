@@ -32,7 +32,7 @@ exec(char *path, char **argv)
   struct proc *p = myproc();
 
   begin_op();
-
+  // 查找并打开文件
   if((ip = namei(path)) == 0){
     end_op();
     return -1;
@@ -40,19 +40,23 @@ exec(char *path, char **argv)
   ilock(ip);
 
   // Check ELF header
+  // 读取 ELF 头部
   if(readi(ip, 0, (uint64)&elf, 0, sizeof(elf)) != sizeof(elf))
     goto bad;
-
+  // 校验
   if(elf.magic != ELF_MAGIC)
     goto bad;
-
+  // 创建新的页表
   if((pagetable = proc_pagetable(p)) == 0)
     goto bad;
 
   // Load program into memory.
+  // 加载程序到内存
   for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
+    // 处理类型为 ELF_PROG_LOAD 的段
     if(readi(ip, 0, (uint64)&ph, off, sizeof(ph)) != sizeof(ph))
       goto bad;
+    // 校验合法性
     if(ph.type != ELF_PROG_LOAD)
       continue;
     if(ph.memsz < ph.filesz)
@@ -61,12 +65,16 @@ exec(char *path, char **argv)
       goto bad;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
+    // 分配内存
     uint64 sz1;
+    printf("exec0: %s, sz: %ld, vaddr: %lx, memsz: %lx, filesz: %lx\n", path, sz, ph.vaddr, ph.memsz, ph.filesz);
     if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz, flags2perm(ph.flags))) == 0)
       goto bad;
+    printf("exec1: %s, sz1: %ld\n", path, sz1);
     sz = sz1;
     if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
       goto bad;
+    printf("exec2: %s, sz: %ld\n", path, sz);
   }
   iunlockput(ip);
   end_op();
@@ -82,6 +90,7 @@ exec(char *path, char **argv)
   uint64 sz1;
   if((sz1 = uvmalloc(pagetable, sz, sz + (USERSTACK+1)*PGSIZE, PTE_W)) == 0)
     goto bad;
+  printf("exec3: %s, sz1: %ld\n", path, sz1);
   sz = sz1;
   uvmclear(pagetable, sz-(USERSTACK+1)*PGSIZE);
   sp = sz;
