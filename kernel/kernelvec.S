@@ -9,56 +9,25 @@
 .globl kerneltrap
 .globl kernelvec
 .align 4
+/*
+ * kernelvec:
+ *   这是 xv6 中 RISC-V 的内核陷入向量入口点。
+ *   - 分配栈空间以保存所有调用者保存的寄存器。
+ *   - 将通用寄存器的当前值保存到栈上。
+ *   - 调用 C 语言的陷入处理函数（kerneltrap）来处理异常/中断。
+ *   - 处理函数返回后，从栈中恢复保存的寄存器。
+ *   - 恢复栈指针，并使用 sret 指令从陷入返回。
+ *   - 注意：tp 寄存器（线程指针，通常为 hartid）不会被恢复，以避免陷入处理函数切换 CPU 时出现问题。
+ */
 kernelvec:
-        # make room to save registers.
+        # 为保存寄存器分配空间
         addi sp, sp, -256
 
-        # save caller-saved registers.
+        # 保存调用者保存的寄存器
         sd ra, 0(sp)
         sd sp, 8(sp)
         sd gp, 16(sp)
         sd tp, 24(sp)
         sd t0, 32(sp)
         sd t1, 40(sp)
-        sd t2, 48(sp)
-        sd a0, 72(sp)
-        sd a1, 80(sp)
-        sd a2, 88(sp)
-        sd a3, 96(sp)
-        sd a4, 104(sp)
-        sd a5, 112(sp)
-        sd a6, 120(sp)
-        sd a7, 128(sp)
-        sd t3, 216(sp)
-        sd t4, 224(sp)
-        sd t5, 232(sp)
-        sd t6, 240(sp)
-
-        # call the C trap handler in trap.c
-        call kerneltrap
-
-        # restore registers.
-        ld ra, 0(sp)
-        ld sp, 8(sp)
-        ld gp, 16(sp)
-        # not tp (contains hartid), in case we moved CPUs
-        ld t0, 32(sp)
-        ld t1, 40(sp)
-        ld t2, 48(sp)
-        ld a0, 72(sp)
-        ld a1, 80(sp)
-        ld a2, 88(sp)
-        ld a3, 96(sp)
-        ld a4, 104(sp)
-        ld a5, 112(sp)
-        ld a6, 120(sp)
-        ld a7, 128(sp)
-        ld t3, 216(sp)
-        ld t4, 224(sp)
-        ld t5, 232(sp)
-        ld t6, 240(sp)
-
-        addi sp, sp, 256
-
-        # return to whatever we were doing in the kernel.
-        sret
+        sd t2, 48(sp)qi

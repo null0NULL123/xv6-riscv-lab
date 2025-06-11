@@ -48,6 +48,9 @@ start()
   asm volatile("mret");
 }
 
+// 定时器初始化，通过写寄存器使能定时器中断。
+// 相关寄存器操作如 w_stimecmp()、r_time()、w_mie()、w_menvcfg() 等，
+// 均通过内联汇编实现对 RISC-V 定时器和中断控制寄存器的读写。
 // ask each hart to generate timer interrupts.
 void
 timerinit()

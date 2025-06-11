@@ -19,6 +19,29 @@
 trampoline:
 .align 4
 .globl uservec
+/*
+ * uservec:
+ *   这是xv6-riscv中用户态陷入内核时的入口点。
+ *   当运行用户代码时，该例程被设置为trap向量（stvec）。
+ *   它在特权模式下执行，但使用的是用户页表。
+ *
+ *   主要步骤：
+ *     - 将用户a0寄存器保存在sscratch中，作为临时存储。
+ *     - 将trapframe（TRAPFRAME）的地址加载到a0中。
+ *     - 将所有用户寄存器保存到TRAPFRAME结构中。
+ *     - 从sscratch恢复原始用户a0到trapframe。
+ *     - 从trapframe初始化内核栈指针（sp）。
+ *     - 从trapframe加载当前hartid到tp。
+ *     - 从trapframe加载usertrap()的地址到t0。
+ *     - 从trapframe加载内核页表地址（satp）到t1。
+ *     - 执行sfence.vma，确保内存操作在用户页表下完成。
+ *     - 切换到内核页表（写satp）。
+ *     - 再次执行sfence.vma，刷新过期的TLB项。
+ *     - 跳转到usertrap()，在内核中处理trap。
+ *
+ *   该代码保存用户态所有必要的状态，并在调用内核trap处理函数前
+ *   切换到内核的地址空间和栈。
+ */
 uservec:    
 	#
         # trap.c sets stvec to point here, so

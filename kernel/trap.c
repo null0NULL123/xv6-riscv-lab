@@ -26,6 +26,7 @@ trapinit(void)
 void
 trapinithart(void)
 {
+  // 启动时通过w_stvec()设置trap向量寄存器（stvec），指定trap发生时跳转的入口地址。
   w_stvec((uint64)kernelvec);
 }
 
@@ -163,13 +164,16 @@ kerneltrap()
 void
 clockintr()
 {
+  // 只有 CPU 0 负责增加全局时钟节拍 ticks，并唤醒等待 ticks 变化的进程（如 sleep）。
   if(cpuid() == 0){
     acquire(&tickslock);
     ticks++;
     wakeup(&ticks);
     release(&tickslock);
   }
-
+  // 申请下一个时钟中断，保证定时器周期性触发
+  // 在 riscv.h 中，相关寄存器操作如 w_stimecmp()、r_time()、w_mie()、w_menvcfg() 等
+  // 均通过内联汇编实现对 RISC-V 定时器和中断控制寄存器的读写。
   // ask for the next timer interrupt. this also clears
   // the interrupt request. 1000000 is about a tenth
   // of a second.
@@ -209,6 +213,7 @@ devintr()
     return 1;
   } else if(scause == 0x8000000000000005L){
     // timer interrupt.
+    // 时钟中断的trap处理
     clockintr();
     return 2;
   } else {

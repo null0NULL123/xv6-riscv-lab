@@ -48,6 +48,8 @@ sys_sbrk(void)
   return addr;
 }
 
+// sleep 的本质是让进程阻塞，底层实现依赖于时钟中断，每次时钟中断会唤醒等待 ticks 变量变化的进程
+// xv6-riscv 中的“时间中断”实现主要涉及硬件定时器、trap（陷阱）处理、时钟中断处理函数、以及内核对时钟节拍（ticks）的维护
 uint64
 sys_sleep(void)
 {
@@ -57,13 +59,17 @@ sys_sleep(void)
   argint(0, &n);
   if(n < 0)
     n = 0;
+  // 加锁，保护 ticks
   acquire(&tickslock);
+  // 记录当前时钟节拍
   ticks0 = ticks;
+  // 等待 ticks 增加到 n 个节拍
   while(ticks - ticks0 < n){
     if(killed(myproc())){
       release(&tickslock);
       return -1;
     }
+    // 让进程睡眠，等待 ticks 变量变化（即时钟中断）
     sleep(&ticks, &tickslock);
   }
   release(&tickslock);
