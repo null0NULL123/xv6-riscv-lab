@@ -72,8 +72,10 @@ exec(char *path, char **argv)
       goto bad;
     printf("exec1: %s, sz1: %ld\n", path, sz1);
     sz = sz1;
-    if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
+  if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
       goto bad;
+  // set final permissions for the segment
+  uvmsetperm(pagetable, ph.vaddr, ph.memsz, PTE_U | PTE_R | flags2perm(ph.flags));
     printf("exec2: %s, sz: %ld\n", path, sz);
   }
   iunlockput(ip);
@@ -161,8 +163,15 @@ loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz
 
   for(i = 0; i < sz; i += PGSIZE){
     pa = walkaddr(pagetable, va + i);
-    if(pa == 0)
-      panic("loadseg: address should exist");
+    if(pa == 0){
+      // lazy alloc didn't map yet; map one page now
+      char *mem = kalloc();
+      if(mem == 0) panic("loadseg: kalloc");
+      memset(mem, 0, PGSIZE);
+      if(mappages(pagetable, PGROUNDDOWN(va+i), PGSIZE, (uint64)mem, PTE_U|PTE_R|PTE_W) != 0)
+        panic("loadseg: mappages");
+      pa = (uint64)mem;
+    }
     if(sz - i < PGSIZE)
       n = sz - i;
     else

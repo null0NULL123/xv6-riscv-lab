@@ -24,10 +24,46 @@ struct {
   struct run *freelist;
 } kmem;
 
+// simple refcount per physical page for COW
+static int refcnt[(PHYSTOP) / PGSIZE];
+
+static inline int pa2index(uint64 pa) {
+  return pa / PGSIZE;
+}
+
+void kref_inc(uint64 pa) {
+  if(pa >= PHYSTOP) return;
+  acquire(&kmem.lock);
+  refcnt[pa2index(pa)]++;
+  release(&kmem.lock);
+}
+
+int kref_dec(uint64 pa) {
+  int v = 0;
+  if(pa >= PHYSTOP) return 0;
+  acquire(&kmem.lock);
+  if(refcnt[pa2index(pa)] > 0)
+    refcnt[pa2index(pa)]--;
+  v = refcnt[pa2index(pa)];
+  release(&kmem.lock);
+  return v;
+}
+
+int kref_get(uint64 pa) {
+  int v = 0;
+  if(pa >= PHYSTOP) return 0;
+  acquire(&kmem.lock);
+  v = refcnt[pa2index(pa)];
+  release(&kmem.lock);
+  return v;
+}
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  // zero refcounts
+  memset(refcnt, 0, sizeof(refcnt));
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -59,19 +95,15 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
+  // Decrease refcount; only free when zero
+  if(kref_dec((uint64)pa) > 0){
+    return;
+  }
+
   // Fill with junk to catch dangling refs.
-  // 访问已经释放的内存就会读取到0x01的值
   memset(pa, 1, PGSIZE);
 
-  // 把物理页的起始地址 pa 强制类型转换为 struct run* 类型
-  // 这样做的目的是把这块物理内存的头部用来存储链表信息
   r = (struct run*)pa;
-
-  // 将一块物理内存页插入到空闲链表头部
-  // 方便后续的内存分配时直接从链表头部取出
-  // 因此链表的顺序是后进先出
-  // 由于freelist 初始值是 NULL
-  // 所以链表的最后一个元素的 next 指针是 NULL
   acquire(&kmem.lock);
   r->next = kmem.freelist;
   kmem.freelist = r;
@@ -94,8 +126,11 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r){
     memset((char*)r, 5, PGSIZE); // fill with junk
+    // new page starts with refcount 1
+    kref_inc((uint64)r);
+  }
   // 当没有可用的物理页时，返回 NULL，即 0
   return (void*)r;
 }

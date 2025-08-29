@@ -265,9 +265,8 @@ growproc(int n)
   sz = p->sz;
   printf("growproc:\n");
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
-      return -1;
-    }
+  sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W);
+  if(sz == 0) return -1;
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }

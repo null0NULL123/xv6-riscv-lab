@@ -116,6 +116,18 @@ $U/_minesweeper: $U/minesweeper.o $(UCCLIB)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $U/_minesweeper $U/minesweeper.o $(UCCL)/libc.o $U/usys.o
 	$(OBJDUMP) -S $U/_minesweeper > $U/minesweeper.asm
 
+$U/_cowtest: $U/cowtest.o $(ULIB)
+	$(LD) $(LDFLAGS) -T $U/user.ld -o $U/_cowtest $U/cowtest.o $(ULIB)
+	$(OBJDUMP) -S $U/_cowtest > $U/cowtest.asm
+
+$U/_lazytest: $U/lazytest.o $(ULIB)
+	$(LD) $(LDFLAGS) -T $U/user.ld -o $U/_lazytest $U/lazytest.o $(ULIB)
+	$(OBJDUMP) -S $U/_lazytest > $U/lazytest.asm
+
+$U/_microbench: $U/microbench.o $(ULIB)
+	$(LD) $(LDFLAGS) -T $U/user.ld -o $U/_microbench $U/microbench.o $(ULIB)
+	$(OBJDUMP) -S $U/_microbench > $U/microbench.asm
+
 mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
 	gcc -Werror -Wall -I. -o mkfs/mkfs mkfs/mkfs.c
 
@@ -145,6 +157,9 @@ UPROGS=\
 	$U/_wc\
 	$U/_zombie\
 	$U/_2048\
+	$U/_cowtest\
+	$U/_lazytest\
+	$U/_microbench\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

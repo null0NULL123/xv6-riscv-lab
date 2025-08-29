@@ -216,9 +216,9 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      continue; // nothing mapped
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue; // lazily unmapped
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -263,38 +263,10 @@ uvmfirst(pagetable_t pagetable, uchar *src, uint sz)
 uint64
 uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm) // 为进程分配新的虚拟内存空间
 {
-  char *mem;
-  uint64 a;
   // 边界检查
   if(newsz < oldsz)
     return oldsz;
-  // 分页对齐
-  oldsz = PGROUNDUP(oldsz);
-  int before = kalloc_count;
-  // 分配循环
-  for (a = oldsz; a < newsz; a += PGSIZE)
-  {
-    // 分配物理页
-    mem = kalloc();
-    kalloc_count++;
-    if (mem == 0)
-    {
-      uvmdealloc(pagetable, a, oldsz);
-      return 0;
-    }
-    // 原先的值为5
-    memset(mem, 0, PGSIZE);
-    // 调用 mappages，将虚拟地址 a 映射到物理地址 mem，权限包括读、用户访问和 xperm
-    // 映射失败则释放物理页并回滚
-    if (mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_R | PTE_U | xperm) != 0)
-    {
-      kfree(mem);
-      uvmdealloc(pagetable, a, oldsz);
-      return 0;
-    }
-  }
-  printf("uvmalloc: from %ld to %ld, kalloc called %d times\n", oldsz, newsz, kalloc_count - before);
-  // 返回新的地址
+  // 懒分配：不立即映射物理页，触发缺页再分配
   return newsz;
 }
 
@@ -316,6 +288,26 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
   return newsz;
 }
 
+// set permission bits on mapped range [va, va+sz)
+void
+uvmsetperm(pagetable_t pagetable, uint64 va, uint64 sz, int perm)
+{
+  uint64 a, last;
+  pte_t *pte;
+  a = PGROUNDDOWN(va);
+  last = PGROUNDDOWN(va + sz - 1);
+  for(;;){
+    pte = walk(pagetable, a, 0);
+    if(pte && (*pte & PTE_V)){
+      uint64 pa = PTE2PA(*pte);
+      int flags = (PTE_FLAGS(*pte) & ~(PTE_R|PTE_W|PTE_X|PTE_U)) | perm | PTE_V;
+      *pte = PA2PTE(pa) | flags;
+    }
+    if(a == last) break;
+    a += PGSIZE;
+  }
+  sfence_vma();
+}
 // Recursively free page-table pages.
 // All leaf mappings must already have been removed.
 void
@@ -358,22 +350,23 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+    pte = walk(old, i, 0);
+    if(pte == 0)
+      continue; // skip unmapped holes (lazy sbrk)
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
+    // mark both parent and child COW (clear W, set COW)
+    flags = (flags & ~PTE_W) | PTE_COW;
+    if(mappages(new, i, PGSIZE, pa, flags) != 0)
       goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
-    }
+    // update parent
+    *pte = PA2PTE(pa) | flags;
+    // bump refcount for shared page
+    kref_inc(pa);
   }
   return 0;
 
@@ -391,7 +384,7 @@ uvmclear(pagetable_t pagetable, uint64 va)
   
   pte = walk(pagetable, va, 0);
   if(pte == 0)
-    panic("uvmclear");
+    return; // nothing mapped; already inaccessible
   *pte &= ~PTE_U;
 }
 
@@ -409,9 +402,20 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     if(va0 >= MAXVA)
       return -1;
     pte = walk(pagetable, va0, 0);
-    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
-       (*pte & PTE_W) == 0)
+    if(pte == 0 || (*pte & PTE_U) == 0)
       return -1;
+    if((*pte & PTE_V) == 0){
+      // lazy allocate missing page
+      if(cow_alloc(pagetable, va0) < 0)
+        return -1;
+      pte = walk(pagetable, va0, 0);
+    }
+    // resolve COW or lack of write perm
+    if(((*pte & PTE_W) == 0) || (*pte & PTE_COW)){
+      if(cow_alloc(pagetable, va0) < 0)
+        return -1;
+      pte = walk(pagetable, va0, 0);
+    }
     pa0 = PTE2PA(*pte);
     n = PGSIZE - (dstva - va0);
     if(n > len)
@@ -436,6 +440,12 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
+    if(pa0 == 0){
+      // try to allocate lazily
+      if(cow_alloc(pagetable, va0) < 0)
+        return -1;
+      pa0 = walkaddr(pagetable, va0);
+    }
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (srcva - va0);
@@ -463,6 +473,11 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   while(got_null == 0 && max > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
+    if(pa0 == 0){
+      if(cow_alloc(pagetable, va0) < 0)
+        return -1;
+      pa0 = walkaddr(pagetable, va0);
+    }
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (srcva - va0);
@@ -491,4 +506,55 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+// Allocate or resolve a writable page at va0 for user: handle COW or lazy page
+int
+cow_alloc(pagetable_t pagetable, uint64 va0)
+{
+  va0 = PGROUNDDOWN(va0);
+  if(va0 >= MAXVA)
+    return -1;
+  pte_t *pte = walk(pagetable, va0, 0);
+  if(pte == 0){
+    // no PTE at all: lazy map a fresh page
+    char *mem = kalloc();
+    if(mem == 0)
+      return -1;
+    memset(mem, 0, PGSIZE);
+    if(mappages(pagetable, va0, PGSIZE, (uint64)mem, PTE_R|PTE_W|PTE_U) != 0){
+      kfree(mem);
+      return -1;
+    }
+    return 0;
+  }
+  if((*pte & PTE_V) && (*pte & PTE_COW)){
+    uint64 pa = PTE2PA(*pte);
+    if(kref_get(pa) == 1){
+      *pte = (*pte & ~PTE_COW) | PTE_W;
+      sfence_vma();
+      return 0;
+    }
+    char *mem = kalloc();
+    if(mem == 0)
+      return -1;
+    memmove(mem, (void*)pa, PGSIZE);
+    uint flags = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
+    *pte = PA2PTE((uint64)mem) | flags;
+    kfree((void*)pa);
+    sfence_vma();
+    return 0;
+  }
+  if((*pte & PTE_V) == 0){
+    char *mem = kalloc();
+    if(mem == 0)
+      return -1;
+    memset(mem, 0, PGSIZE);
+    if(mappages(pagetable, va0, PGSIZE, (uint64)mem, PTE_R|PTE_W|PTE_U) != 0){
+      kfree(mem);
+      return -1;
+    }
+    return 0;
+  }
+  return 0;
 }
